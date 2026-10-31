@@ -1,8 +1,7 @@
 <?php
 
-/* @version 1.4.4 */
+/* @version 1.5.0 */
 
-require_once(__DIR__ . '/vendor/autoload.php');
 use League\OAuth2\Client\Provider\GenericProvider;
 use LimeSurvey\PluginManager\AuthPluginBase;
 use LimeSurvey\PluginManager\LimesurveyApi;
@@ -27,6 +26,17 @@ if (file_exists(__DIR__ . '/vendor/autoload.php')) {
 class AuthOAuth2 extends AuthPluginBase
 {
     protected const SESSION_STATE_KEY = 'oauth_auth_state';
+
+    /**
+     * Transformations that may be appended to a key with a dot, e.g. "given_name.first_letter".
+     * A dot otherwise separates nesting levels of a JSON path.
+     */
+    protected const KEY_MODIFIERS = ['first_letter', 'capitalize', 'upper_case', 'lower_case'];
+
+    /**
+     * String values that mean "off" for a switch setting, whatever the admin typed.
+     */
+    protected const SWITCH_OFF_VALUES = ['0', 'n', 'no', 'off', 'false', 'null', 'none'];
 
     protected $storage = 'DbStorage';
     protected static $name = 'OAuth2 Authentication';
@@ -237,7 +247,7 @@ class AuthOAuth2 extends AuthPluginBase
             $this->settings['roles_key'] = [
                 'type' => 'string',
                 'label' => $this->gT('Key for roles in user detail'),
-                'help' => $this->gT('Key to get the user roles. Must be an array, if roles exist : it was assigned to the user when it was created.'),
+                'help' => $this->gT('Path to the user detail attribute that holds the roles. The value must be a list of role names matching existing LimeSurvey user roles. Examples: "roles", "realm_access.roles", "resource_access.myclient.roles". A name that itself contains a dot is matched literally, or can be written in brackets: "[resource.access].roles".'),
                 'default' => $this->getGlobalSetting('roles_key', ''),
                 'htmlOptions' => [
                     'readonly' => in_array('roles_key', $fixedPluginSettings)
@@ -253,7 +263,7 @@ class AuthOAuth2 extends AuthPluginBase
                 ]
             ];
             $this->settings['roles_needed'] = [
-                'type' => 'string',
+                'type' => 'checkbox',
                 'label' => $this->gT('Need a minimum one role to allow log in or create user.'),
                 'help' => $this->gT('If user didn\'t have any roles : disallow log in. Roles name are not checked with existing role.'),
                 'default' => $this->getGlobalSetting('roles_needed', ''),
@@ -285,8 +295,13 @@ class AuthOAuth2 extends AuthPluginBase
             'type' => 'json',
             'label' => $this->gT('Global permissions for new users'),
             'help' => sprintf(
-                $this->gT('A JSON object describing the default permissions to be assigned to users that are automatically created. The JSON object has the following form: %s'),
-                CHtml::tag('pre', [], "{\n\t\"surveys\": { ... },\n\t\"templates\": {\n\t\t\"create\": false,\n\t\t\"read\": false,\n\t\t\"update\": false,\n\t\t\"delete\": false,\n\t\t\"import\": false,\n\t\t\"export\": false,\n\t},\n\t\"users\": { ... },\n\t...\n}")
+                "%s<br><br><strong>%s</strong> %s",
+                sprintf(
+                    $this->gT('A JSON object describing the default permissions to be assigned to users that are automatically created. The JSON object has the following form: %s'),
+                    CHtml::tag('pre', [], "{\n\t\"surveys\": { ... },\n\t\"templates\": {\n\t\t\"create\": false,\n\t\t\"read\": false,\n\t\t\"update\": false,\n\t\t\"delete\": false,\n\t\t\"import\": false,\n\t\t\"export\": false,\n\t},\n\t\"users\": { ... },\n\t...\n}")
+                ),
+                $this->gT('Note:'),
+                $this->gT('an empty object grants no permissions at all. Once a user belongs to any LimeSurvey user role, LimeSurvey answers permission questions from that role and ignores these per-user permissions, so grant the rights on the role instead.')
             ),
             'editorOptions' => array('mode' => 'tree'),
             'default' => $this->getGlobalSetting(
@@ -361,7 +376,7 @@ class AuthOAuth2 extends AuthPluginBase
         ]);
 
         $code = $request->getParam('code');
-        $defaultAuth = $this->getGlobalSetting('is_default') ? self::class : null;
+        $defaultAuth = $this->isSettingEnabled('is_default') ? self::class : null;
         if (empty($code) && $request->getParam('authMethod', $defaultAuth) !== self::class) {
             return;
         }
@@ -426,8 +441,8 @@ class AuthOAuth2 extends AuthPluginBase
             $user = $this->api->getUserByName($userIdentifier);
         }
 
-        if (!$user && !$this->getGlobalSetting('autocreate_users')) {
-            if ($this->getGlobalSetting('is_default')) {
+        if (!$user && !$this->isSettingEnabled('autocreate_users')) {
+            if ($this->isSettingEnabled('is_default')) {
                 /* No way to connect : throw a 403 error (avoid looping) */
                 throw new CHttpException(403, gT('Incorrect username and/or password!'));
             } else {
@@ -435,10 +450,10 @@ class AuthOAuth2 extends AuthPluginBase
                 return;
             }
         }
-        if ($this->getGlobalSetting('roles_needed', false) && $rolesKey = $this->getGlobalSetting('roles_key', '')) {
+        if ($this->isSettingEnabled('roles_needed') && ($rolesKey = $this->getGlobalSetting('roles_key', ''))) {
             $aRoles = $this->getFromResourceData($rolesKey);
             if (empty($aRoles)) {
-                if ($this->getGlobalSetting('is_default')) {
+                if ($this->isSettingEnabled('is_default')) {
                     /* No way to connect : throw a 403 error (avoid looping) */
                     throw new CHttpException(403, gT('Incorrect username and/or password!'));
                 } else {
@@ -459,7 +474,7 @@ class AuthOAuth2 extends AuthPluginBase
             $email = $this->getFromResourceData($emailKey);
 
             $user = new User();
-            $user->parent_id = 1;
+            $user->parent_id = 0;
             $user->setPassword(createPassword());
 
             $user->users_name = $username;
@@ -469,10 +484,8 @@ class AuthOAuth2 extends AuthPluginBase
             if (!$user->save()) {
                 throw new CHttpException(401, $this->gT('Failed to create new user'));
             }
-            $defaultPermissions = @json_decode($this->getGlobalSetting('autocreate_permissions', self::getDefaultPermission()), true);
-            if (!empty($defaultPermissions)) {
-                Permission::setPermissions($user->uid, 0, 'global', $defaultPermissions, true);
-            }
+            Yii::app()->db->createCommand()
+                ->delete('{{permissions}}', 'uid = :uid', [':uid' => (int) $user->uid]);
             /* Add auth_oauth2 permission if not already exist*/
             self::setOauthPermission($user->uid, true);
             /* Add optional roles */
@@ -489,7 +502,7 @@ class AuthOAuth2 extends AuthPluginBase
             $this->setAuthSuccess($user, $oIdentityEvent);
         } else {
             /* Update roles if needed */
-            if ($this->getGlobalSetting('roles_update', false)) {
+            if ($this->isSettingEnabled('roles_update')) {
                 UserInPermissionrole::model()->deleteAll("uid = :uid", [':uid' => $user->uid]);
                 $this->setRolesToUser($user->uid);
             }
@@ -505,7 +518,7 @@ class AuthOAuth2 extends AuthPluginBase
                 if (empty($permissionnExist)) {
                     Permission::model()->setGlobalPermission($user->uid, 'auth_oauth');
                 } else {
-                    if ($this->getGlobalSetting('is_default')) {
+                    if ($this->isSettingEnabled('is_default')) {
                         /* No way to connect : throw a 403 error (avoid looping) */
                         throw new CHttpException(403, gT('Incorrect username and/or password!'));
                     } else {
@@ -544,32 +557,13 @@ class AuthOAuth2 extends AuthPluginBase
     {
         $rValue = '';
         if (str_contains($iKey, '.') || str_contains($iKey, '+')) {
-            $newUsernameKey = '';
             $sub_values = array_map(
                 function ($sub_key) {
-                    $sub_key_modified = $sub_key;
-                    $value = '';
-                    if (str_contains($sub_key, '.')) {
-                        $sub_key_as_table = explode('.', $sub_key);
-                        $sub_key_modified = $sub_key_as_table[0];
-                        $value = $this->getFromResourceData($sub_key_modified);
-                        $modifier = $sub_key_as_table[1];
-                        if ($modifier === 'first_letter') {
-                            $value = join('', array_map(
-                                function ($spaceSeparatedElements) {
-                                    return strtolower($spaceSeparatedElements[0]);
-                                },
-                                explode(' ', $value)
-                            ));
-                        } elseif ($modifier === 'capitalize') {
-                            $value = ucfirst(strtolower($value));
-                        } elseif ($modifier === 'upper_case') {
-                            $value = strtoupper($value);
-                        } elseif ($modifier === 'lower_case') {
-                            $value = strtolower($value);
-                        }
-                    } else {
-                        $value = $this->getFromResourceData($sub_key_modified);
+                    $value = $this->getFromResourceData($sub_key);
+                    // A template key must yield text: a path to an object or list is a
+                    // configuration error, and reporting it beats a join() type error.
+                    if (is_array($value) || is_object($value)) {
+                        throw new CHttpException(401, $this->gT('User data is missing required attributes to create new user:') . $sub_key);
                     }
                     return $value;
                 },
@@ -579,8 +573,11 @@ class AuthOAuth2 extends AuthPluginBase
             $rValue = join($iSeparator, $sub_values);
         } else {
             $rValue = $this->getFromResourceData($iKey);
+            if (is_array($rValue) || is_object($rValue)) {
+                throw new CHttpException(401, $this->gT('User data is missing required attributes to create new user:') . $iKey);
+            }
         }
-        return $rValue;
+        return (string) $rValue;
     }
 
     /**
@@ -589,13 +586,225 @@ class AuthOAuth2 extends AuthPluginBase
      */
     private function getFromResourceData(string $key): mixed
     {
-        $value = '';
-        if (empty($this->resourceData[$key])) {
+        $value = self::resolvePath($this->resourceData, $key);
+        if (empty($value)) {
             throw new CHttpException(401, $this->gT('User data is missing required attributes to create new user:') . $key);
-        } else {
-            $value = $this->resourceData[$key];
         }
         return $value;
+    }
+
+    /**
+     * Read a value from the user details using a dotted JSON path, so that nested claims can
+     * be used. Both shapes work:
+     *   "email"                                  -> flat claim
+     *   "resource_access.limesurvey.roles"        -> Keycloak client roles
+     *   "realm_access.roles"                      -> Keycloak realm roles
+     *   "resource_access['some.client'].roles"     -> client IDs that contain a dot
+     * An optional trailing modifier (see KEY_MODIFIERS) is applied to the value found.
+     *
+     * @param array|object|null $data decoded user details
+     * @param string $path
+     * @return mixed null when the path does not exist
+     */
+    public static function resolvePath($data, string $path): mixed
+    {
+        $tokens = self::splitPath($path);
+        if (empty($tokens)) {
+            return null;
+        }
+
+        // A trailing transformation such as "given_name.first_letter". Never popped when it is
+        // the only token, so a claim genuinely named "upper_case" still resolves.
+        $modifier = null;
+        $last = (string) end($tokens);
+        if (count($tokens) > 1 && !self::isBracketed($last) && in_array($last, self::KEY_MODIFIERS, true)) {
+            $modifier = array_pop($tokens);
+        }
+
+        $value = self::lookupTokens($tokens, $data);
+        return $modifier === null ? $value : self::applyKeyModifier($value, $modifier);
+    }
+
+    /**
+     * Walk the tokens down the data tree. At every level the LONGEST literal key wins, so a
+     * claim whose own name contains a dot ("resource.access") is preferred over re-reading it
+     * as two nesting levels, and a wrong guess surfaces as an error instead of as wrong roles.
+     *
+     * @param array<int,string> $tokens tokens still to consume, brackets still attached
+     * @param array|object|null $node
+     * @return mixed null when nothing matches
+     */
+    private static function lookupTokens(array $tokens, $node): mixed
+    {
+        if (empty($tokens)) {
+            return $node;
+        }
+        if (!is_array($node) && !is_object($node)) {
+            return null;
+        }
+
+        // Consecutive plain tokens may be joined into one key; a bracketed token is atomic.
+        $longest = 1;
+        for ($i = 1; $i < count($tokens); $i++) {
+            if (self::isBracketed($tokens[$i])) {
+                break;
+            }
+            $longest = $i + 1;
+        }
+
+        for ($length = $longest; $length >= 1; $length--) {
+            $slice = array_slice($tokens, 0, $length);
+            $key = implode('.', array_map([__CLASS__, 'keyOfToken'], $slice));
+
+            if (is_array($node) && array_key_exists($key, $node)) {
+                $found = self::lookupTokens(array_slice($tokens, $length), $node[$key]);
+            } elseif (is_object($node) && property_exists($node, $key)) {
+                $found = self::lookupTokens(array_slice($tokens, $length), $node->{$key});
+            } else {
+                continue;
+            }
+
+            if ($found !== null) {
+                return $found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param string $token
+     * @return bool whether the token was written in brackets and is therefore atomic
+     */
+    private static function isBracketed(string $token): bool
+    {
+        return str_starts_with($token, '[');
+    }
+
+    /**
+     * Strip the brackets and any quotes from a bracketed token; plain tokens pass through.
+     *
+     * @param string $token
+     * @return string
+     */
+    private static function keyOfToken(string $token): string
+    {
+        return self::isBracketed($token) ? trim($token, "[]'\" \t") : $token;
+    }
+
+    /**
+     * Split a path into tokens. Brackets mark a key that contains a dot, quoted or not:
+     * "[resource.access].roles", "['sondages.pro'].roles" and "[\"sondages.pro\"].roles"
+     * all work. Quotes are optional, which matters because the setting is stored in an
+     * admin text field that may escape them.
+     *
+     * @param string $path
+     * @return array<int,string>
+     */
+    private static function splitPath(string $path): array
+    {
+        $path = trim($path);
+        if ($path === '') {
+            return [];
+        }
+        // Either a bracketed group (kept intact, quotes and all) or a run of plain characters.
+        if (!preg_match_all('/\[[^\]]*\]|[^.\[\]]+/', $path, $matches)) {
+            return [];
+        }
+        return $matches[0];
+    }
+
+    /**
+     * Apply one of the KEY_MODIFIERS transformations to a value.
+     *
+     * @param mixed $value
+     * @param string $modifier
+     * @return mixed
+     */
+    private static function applyKeyModifier($value, string $modifier)
+    {
+        if (!is_scalar($value)) {
+            return $value;
+        }
+        $value = (string) $value;
+
+        switch ($modifier) {
+            case 'first_letter':
+                return join('', array_map(
+                    function ($spaceSeparatedElements) {
+                        return $spaceSeparatedElements === '' ? '' : strtolower($spaceSeparatedElements[0]);
+                    },
+                    explode(' ', $value)
+                ));
+            case 'capitalize':
+                return ucfirst(strtolower($value));
+            case 'upper_case':
+                return strtoupper($value);
+            case 'lower_case':
+                return strtolower($value);
+            default:
+                return $value;
+        }
+    }
+
+    /**
+     * Normalise the autocreate_permissions setting into a permission array, or null when it is
+     * not usable at all.
+     *
+     * The value reaches us in three shapes: DbStorage json_decodes every stored value, so a saved
+     * setting arrives as an array; a value from config.php AuthOAuth2Settings may be an array or a
+     * JSON string; and the plugin default is the JSON string from getDefaultPermission(). A JSON
+     * object with no entries is a real answer ("grant nothing") and must stay an empty array, while
+     * a malformed value must not silently grant anything.
+     *
+     * @param mixed $value
+     * @return array|null null when the value is missing or cannot be interpreted
+     */
+    public static function normalizePermissionSetting($value): ?array
+    {
+        if (is_string($value)) {
+            $value = trim($value);
+            if ($value === '') {
+                return null;
+            }
+            $decoded = json_decode($value, true);
+            // A bare string that is not JSON, or a JSON scalar, is not a permission set.
+            return is_array($decoded) ? $decoded : null;
+        }
+        return is_array($value) ? $value : null;
+    }
+
+    /**
+     * Read a setting that is used as a switch.
+     *
+     * Values arrive from three places: the settings form (a checkbox posts "1", or nothing at
+     * all when unchecked, which LimeSurvey saves as null), config.php AuthOAuth2Settings fixed
+     * or default entries, and hand-edited databases. LimeSurvey writes "Y"/"N" for booleans
+     * elsewhere, and "N" is truthy in PHP, so an admin who follows that convention in
+     * config.php would silently get the switch turned ON. Anything shaped like a refusal is
+     * therefore treated as off.
+     *
+     * @param string $setting
+     * @return bool
+     */
+    private function isSettingEnabled(string $setting): bool
+    {
+        return self::isSwitchOn($this->getGlobalSetting($setting, false));
+    }
+
+    /**
+     * @param mixed $value
+     * @return bool
+     */
+    public static function isSwitchOn($value): bool
+    {
+        if (is_string($value)) {
+            $value = trim($value);
+            return $value !== '' && !in_array(strtolower($value), self::SWITCH_OFF_VALUES, true);
+        }
+        if (is_array($value)) {
+            return !empty($value);
+        }
+        return (bool) $value;
     }
 
     /**
@@ -710,22 +919,59 @@ class AuthOAuth2 extends AuthPluginBase
     }
 
     /**
+     * Normalise whatever the claim contains into a clean list of role names.
+     * A list is the normal case; a single string happens when the Keycloak mapper has
+     * "Multivalued" switched off, and a comma separated string when it was aggregated.
+     *
+     * @param mixed $roles
+     * @return array<int,string>
+     */
+    public static function normalizeRoleList($roles): array
+    {
+        if (is_string($roles)) {
+            $roles = explode(',', $roles);
+        } elseif (is_object($roles)) {
+            $roles = get_object_vars($roles);
+        } elseif (!is_array($roles)) {
+            $roles = [$roles];
+        }
+
+        $roles = array_map(
+            static function ($role) {
+                return trim((string) $role);
+            },
+            $roles
+        );
+
+        return array_values(array_filter($roles, static function ($role) {
+            return $role !== '';
+        }));
+    }
+
+    /**
      * Set the roles using current settings
      * @param integer $userId
      */
     private function setRolesToUser($userId)
     {
+        if (method_exists(Permissiontemplates::class, 'applyToUser')) {
+            $autocreateRoles = $this->getGlobalSetting('autocreate_roles');
+            if (!empty($autocreateRoles)) {
+                foreach ($autocreateRoles as $role) {
+                    Permissiontemplates::model()->applyToUser($userId, $role);
+                }
+            }
+        }
         $rolesKey = $this->getGlobalSetting('roles_key', '');
         if (!empty($rolesKey)) {
-            $aRoles = $this->getFromResourceData($rolesKey);
+            $aRoles = self::normalizeRoleList($this->getFromResourceData($rolesKey));
             if (!empty($aRoles)) {
                 $resetPermission = false;
-                $aRoles = (array) $aRoles;
                 foreach ($aRoles as $role) {
                     $rolesRemovetext = $this->getGlobalSetting('roles_removetext', '');
                     $role = str_replace($rolesRemovetext, '', $role);
                     $criteria = new CDbCriteria();
-                    if ($this->getGlobalSetting('roles_insensitive', false)) {
+                    if ($this->isSettingEnabled('roles_insensitive')) {
                         $criteria->compare('LOWER(name)', strtolower($role), true);
                     } else {
                         $criteria->compare('name', $role, true);
@@ -746,7 +992,7 @@ class AuthOAuth2 extends AuthPluginBase
     /**
      * Set Oauth permission  : use to create permission with 0 ar read_p or update if exist.
      * @param integer $userId
-     * @param boolean $read permission
+     * @param boolean $allow permission
      */
     private static function setOauthPermission($userId, $allow = true)
     {
