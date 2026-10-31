@@ -9,6 +9,20 @@ use LimeSurvey\PluginManager\LimesurveyApi;
 use LimeSurvey\PluginManager\PluginEvent;
 use LimeSurvey\PluginManager\PluginManager;
 
+// LimeSurvey >= 6 already bundles league/oauth2-client in its own vendor autoload, which is
+// registered before any plugin is loaded. Use the plugin's own vendor/ when it exists
+// (LimeSurvey < 6, or after running `composer install` in this directory), and fall back to
+// the LimeSurvey core autoloader otherwise.
+if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+    require_once(__DIR__ . '/vendor/autoload.php');
+} elseif (!class_exists('League\OAuth2\Client\Provider\GenericProvider')) {
+    throw new RuntimeException(sprintf(
+        'AuthOAuth2 requires the league/oauth2-client library. Run "composer install" in %s, '
+        . 'or use LimeSurvey 6 or newer, which ships the library in its own vendor folder.',
+        __DIR__
+    ));
+}
+
 
 class AuthOAuth2 extends AuthPluginBase
 {
