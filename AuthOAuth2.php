@@ -588,7 +588,7 @@ class AuthOAuth2 extends AuthPluginBase
     {
         $value = self::resolvePath($this->resourceData, $key);
         if (empty($value)) {
-            throw new CHttpException(401, $this->gT('User data is missing required attributes to create new user:') . $key);
+            return [];
         }
         return $value;
     }
