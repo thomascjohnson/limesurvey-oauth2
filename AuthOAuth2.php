@@ -273,8 +273,8 @@ class AuthOAuth2 extends AuthPluginBase
             ];
             $this->settings['roles_removetext'] = [
                 'type' => 'string',
-                'label' => $this->gT('Allow you to remove specific string on the roles returnned'),
-                'help' => $this->gT('This string was removed to the roles returned before comparaison.'),
+                'label' => $this->gT('Allow you to remove specific string on the roles returned'),
+                'help' => $this->gT('This string was removed to the roles returned before comparison.'),
                 'default' => $this->getGlobalSetting('roles_removetext', ''),
                 'htmlOptions' => [
                     'readonly' => in_array('roles_removetext', $fixedPluginSettings)
@@ -282,8 +282,8 @@ class AuthOAuth2 extends AuthPluginBase
             ];
             $this->settings['roles_insensitive'] = [
                 'type' => 'checkbox',
-                'label' => $this->gT('Insensitive comparaison for roles'),
-                'help' => $this->gT('Do an insensitive comparaison before search the roles.'),
+                'label' => $this->gT('Insensitive comparison for roles'),
+                'help' => $this->gT('Do an insensitive comparison before search the roles.'),
                 'default' => $this->getGlobalSetting('roles_insensitive', ''),
                 'htmlOptions' => [
                     'disabled' => in_array('roles_insensitive', $fixedPluginSettings)
